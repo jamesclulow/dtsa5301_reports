@@ -1,0 +1,254 @@
+---
+title: "NYPD Shooting Incident Data Report"
+author: 'James S Clulow'
+date: "2023-05-14"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load required libraries
+library(tidyverse)
+library(knitr)
+library(hms)
+
+# Load NYPD shooting data
+nypd_shooting <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+```
+
+## Introduction and data loading
+
+  The goal of this analysis is to describe the changes in numbers of firearms incident victims or murder victims in New York City over time and to analyse the impact of the COVID-19 pandemic on firearms incidents. The primary data set used in this report is from the city of New York and describes firearms incidents in New York City from 2006 to 2022.
+
+## Data Cleaning
+
+### Data Structure
+
+  After loading the data in, the data structure was checked to remove any variables not needed for the analysis and to check the quality of the data to ensure that any missing data is dealt with appropriately. The nypd_shooting dataset contains 21 variables and 27,312 observations of shootings. When first loaded, dates were stored as characters and several character vectors will need to be converted to factors for the purpose of this analysis.
+  
+```{r data_structure_shootings, include=TRUE}
+str(nypd_shooting)
+```
+
+### Cleaning and Transformation
+
+After checking the structure of the data, I removed several variables not needed for the analysis and created a new YEAR variable.
+
+```{r data_structure_shootings2, include=TRUE}
+nypd_shooting <- nypd_shooting %>%
+  # Select variables needed for analysis
+  select(one_of(
+    c(
+      "INCIDENT_KEY",
+      "OCCUR_DATE",
+      "OCCUR_TIME",
+      "BORO",
+      "PRECINCT",
+      "STATISTICAL_MURDER_FLAG",
+      "VIC_AGE_GROUP",
+      "VIC_SEX",
+      "VIC_RACE"
+    )
+  )) %>%
+  # Change OCCUR_DATE to date format
+  mutate(OCCUR_DATE = as.Date(OCCUR_DATE, format = "%m/%d/%Y")) %>%
+  # Create YEAR column
+  mutate(YEAR = year(OCCUR_DATE), .after = OCCUR_DATE)
+str(nypd_shooting)
+```
+
+I then checked the ranges of each variable to ensure that there were no unexpected values.
+
+There were a total of `r nrow(nypd_shooting %>% count(INCIDENT_KEY) %>% filter(n > 1))` incidents with more than one victim.
+
+```{r range_checks}
+# Summarise data for each variable
+kable(nypd_shooting %>% summarise(
+  START_DATE = min(OCCUR_DATE),
+  END_DATE = max(OCCUR_DATE)
+),
+caption = "Start and End Date of dataset")
+kable(nypd_shooting %>% summarise(MIN = min(OCCUR_TIME), MAX = max(OCCUR_TIME)), caption = "Min and Max of OCCUR_TIME")
+kable(nypd_shooting %>% count(BORO), caption = "Summary of incidents per Borough.")
+kable(nypd_shooting %>% count(PRECINCT), caption = "Summary of incidents per Precinct.")
+kable(nypd_shooting %>% count(YEAR), caption = "Summary of incidents per Year.")
+kable(nypd_shooting %>% count(STATISTICAL_MURDER_FLAG), caption = "Summary of murders.")
+kable(nypd_shooting %>% count(VIC_AGE_GROUP), caption = "Summary of incidents per victim age group.")
+kable(nypd_shooting %>% count(VIC_SEX), caption = "Summary of incidents per victim sex.")
+kable(nypd_shooting %>% count(VIC_RACE), caption = "Summary of incidents per victim race.")
+```
+
+From the data summaries above, we can see that the majority of the variables are within the expected ranges. However, VIC_AGE_GROUP contains an unexpected value at 1022. This value was converted to "UKNOWN" rather than removed from the data set. As previously mentioned, VIC_AGE_GROUP, VIC_SEX, VIC_RACE need to be converted to factors. Additionally, we can see that some incidents resulted in multiple victims.
+
+For the purpose of this analysis, we will look at the number of victims per year rather than individual incidents.
+
+## Analysis of data on Firearms Incident Victims from 2006 - 2022 in New York City
+
+To start, I analyzed the overall number of firearms incident victims per year across all of New York City.
+
+```{r primary_analysis, echo=FALSE, results='asis'}
+dt <- count(group_by_at(nypd_shooting, .vars = c("YEAR")))
+
+kable(dt %>%
+        pivot_wider(names_from = YEAR, values_from = n))
+
+ggplot(dt, aes(x = YEAR, y = n)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(xintercept = 2019, color = "red") +
+  ggtitle("Number of firearms victims per year", subtitle = "Data from 2006 - 2022") +
+  labs(x = "Year", y = "No. of victims") +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = .5,
+    hjust = 1
+  )) +
+  scale_x_continuous(breaks = seq(2006, 2022, 2))
+```
+
+Here we can see that following the number of victims per year has changed significantly since 2006. There appears to be a downward trend in the number of victims from 2006 - 2019, with a sharp increase in 2020. I would speculate that this may be related to onset of the COVID-19 pandemic, but more on that later.
+
+To complement this analysis, I wanted to understand if we see the same overall trend when looking at the data by borough instead of city-wide.
+
+```{r primary_analysis_boro, echo=FALSE, results='asis'}
+dt <- count(group_by_at(nypd_shooting, .vars = c("YEAR", "BORO")))
+
+kable(dt %>%
+        pivot_wider(names_from = YEAR, values_from = n))
+
+ggplot(dt, aes(x = YEAR, y = n)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(xintercept = 2019, color = "red") +
+  ggtitle("Number of firearms victims per year by borough", subtitle = "Data from 2006 - 2022") +
+  labs(x = "Year", y = "No. of victims") +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = .5,
+    hjust = 1
+  )) +
+  scale_x_continuous(breaks = seq(2006, 2022, 2)) +
+  facet_wrap( ~ BORO)
+```
+There appears to be the same downward trend in the number of victims from 2006 - 2019, with the sharp increase in 2020. The trend is conserved across most boroughs, however, the overall numbers are different most likely due to other factors such as population density, demographics, and socioeconomic status.
+
+### Seasonality of firearms incidents in New York City
+
+If we want to look closer at the dates around the COVID-19 pandemic, we also need to understand if there is a seasonality to the number of victims. With this in mind, I looked at the number of victims per month for each year to see if there are higher numbers in specific months.
+
+```{r, seasonality-shootings-per-month}
+# Create summary data by month
+fatalities_per_month <- nypd_shooting %>%
+  mutate(MONTH = month(OCCUR_DATE),
+         MONTH_YEAR  = format_ISO8601(OCCUR_DATE, precision = "ym")) %>%
+  select(INCIDENT_KEY, MONTH_YEAR, YEAR, MONTH, STATISTICAL_MURDER_FLAG) %>%
+  group_by(MONTH_YEAR, YEAR, MONTH) %>%
+  summarise(
+    VIC_PER_MONTH = n(),
+    MURDER_PER_MONTH = sum(STATISTICAL_MURDER_FLAG)
+  )
+
+# Graph shootings per month
+ggplot(fatalities_per_month,
+       aes(x = MONTH, y = VIC_PER_MONTH, group = YEAR)) + geom_point() +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = .5,
+    hjust = 1
+  )) +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = seq_along(month.name),
+                     labels = month.name) +
+  labs(
+    y = "Firearms victims per month",
+    x = "Month",
+    title = "Seasonality of firearms victims per month in NYC",
+    subtitle = "Data from 2006 - 2022"
+  )
+```
+When looking at the data per month and year, we can see that each year there is a clear peak in the summer months of June, July, August with a decrease in the winter months. After establishing the seasonality, I wanted to take a closer look at the dates around the start of the COVID-19 pandemic to rule out the influence of seasonality on the increase seen during the COVID-19 pandemic.
+
+### Impact of COVID-19 Pandemic
+
+```{r, seasonality-covid}
+# Create summary data for COVID period
+fatalities_per_month_covid <- nypd_shooting %>%
+  filter(YEAR >= 2017) %>%
+  mutate(MONTH = month(OCCUR_DATE),
+         MONTH_YEAR  = format_ISO8601(OCCUR_DATE, precision = "ym")) %>%
+  select(INCIDENT_KEY, MONTH_YEAR, YEAR, MONTH, STATISTICAL_MURDER_FLAG) %>%
+  group_by(MONTH_YEAR, YEAR, MONTH) %>%
+  summarise(
+    VIC_PER_MONTH = n(),
+    MURDER_PER_MONTH = sum(STATISTICAL_MURDER_FLAG)
+  )
+
+# Graph fatalities per month for years 2017-2022
+ggplot(fatalities_per_month_covid,
+       aes(x = MONTH, y = VIC_PER_MONTH, color = as.factor(YEAR))) + geom_point() +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = .5,
+    hjust = 1
+  )) +
+  geom_line() +
+  scale_x_continuous(breaks = seq_along(month.name),
+                     labels = month.name) +
+  labs(
+    y = "Firearms victims per month",
+    x = "Month",
+    title = "Seasonality of firearms victims per month in NYC Pre/Post-COVID",
+    subtitle = "Data from 2017 - 2019 Pre/2020 - 2022 Post",
+    color = "Year"
+  ) +
+  geom_vline(xintercept = 3, color = "red")
+```
+
+If we look a bit closer at the data near the COVID-19 pandemic, we can see that the seasonality conserved, but we see a very sharp increase in the number of shooting victims following the start of the COVID-19 pandemic in March 2020. Furthermore, the peak in July 2020 is more than double the previous years of 2017-2019. The increase observed in the summer of 2020 cannot be solely explained by the seasonal changes observed across all years.
+
+To better understand the impact of seasonality, I wanted to look at the impact of season (Spring, Summer, Fall, Winter) on the relationship between the number of shooting victims and the number of murders. In other words, is there a season which has higher death rate from the shootings. To do so, I transformed the data to include a season variable and created an additive linear model to look at the difference between seasons.
+
+### Modelling impact of season overall
+
+```{r, seasonality-model}
+# Create dataset for model
+fatalities_per_season <- nypd_shooting %>%
+  mutate(SEASON = as.factor(quarter(OCCUR_DATE, fiscal_start = 3)),
+         MONTH = month(OCCUR_DATE)) %>%
+select(INCIDENT_KEY, SEASON, MONTH, YEAR, STATISTICAL_MURDER_FLAG) %>%
+  group_by(SEASON, YEAR) %>% 
+  summarise(VIC_PER_SEASON = n(),
+            MURDER_PER_SEASON = sum(STATISTICAL_MURDER_FLAG)) %>%
+  ungroup()
+
+fatalities_per_season <- fatalities_per_season %>%
+  mutate(SEASON = recode(SEASON, "1" = "Spring", "2" = "Summer", "3" = "Fall", "4" = "Winter"))
+
+# Plot data
+ggplot(fatalities_per_season,
+       aes(x = VIC_PER_SEASON, y = MURDER_PER_SEASON, color = SEASON)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = T) +
+  labs(x = "No. of shooting victims per season", y = "No. of murders per season", title = "No. of Murders vs. No. of shooting incidents by season in NYC", subtitle = "Data from 2006-2022", color = "Season")
+
+# Create linear model
+mdl <- lm(MURDER_PER_SEASON ~ VIC_PER_SEASON+SEASON, fatalities_per_season)
+
+# Model Summary
+summary(mdl)
+```
+
+As we can see from the model, the murder rate actually decreases despite the increase in firearms incident victims observed due to seasonality. This is shown to be statistically significant with p-value of 0.00118. Winter appears to be the "deadliest" season with an increase in the rate of murders, however, this is not statistically significant with a p-value of 0.15445. One might speculate that the increase of firearms incidents over summer may be related to increased gang related activity in the summer with less intent to kill.
+
+### Bias sources
+
+  Throughout the analysis, I refer to the impact of the COVID-19 pandemic on the number of shooting victims and incidents. However, my interpretation of the data may be slightly biased as I do not live in the US and may not be aware of other potential events that could have impacted the number of shooting incidents at that time. I know that 2020 was a year not only of significance due to the COVID-19 pandemic, but also of political and social justice significance. Events like the George Floyd protests that occurred in late May 2020 were not taken into consideration during my interpretation of the analysis, but may have contributed to an increased number of firearms incidents due to rising racial tension in the USA. I did not include race in my analysis as it would have been complicated to avoid bias without detailed census data to normalize for differences in demographics across boroughs, precincts, and years. However, this would be an interesting topic to look into.
+  
+## Conclusions
+  I started out my investigation of the NYC shooting incidents data by looking at the number of shooting victims per year across all years from 2006-2022. The number of shooting victims was declining over time from 2006 - 2019 until 2020, where a sharp increase in the number of shooting victims was observed. The same trend was conserved across boroughs in NYC with an increase in numbers in 2020. One hypothesis is that the drastic increase in shootings is due to economic hardship incurred following the onset of the COVID-19 pandemic in March 2020.
+  To look further into this hypothesis, I first wanted to assess the impact of seasonality on the number of shootings to be sure that any increase observed by month was more important than that related to seasonality. The number of shooting victims increases each year during the summer months and then decreases over time to a low in winter. when looking at the three years prior and post COVID-19, the same seasonality is present, however, the increase in summer 2020 is more than 2 fold with respect to previous years.
+  To compliment the analysis on seasonality, I created an additive linear model to assess the impact of seasonality on murder rate. It was observed that while the number of shooting victims increases significantly in the summer, the number of which result in murders actually decreases.
+

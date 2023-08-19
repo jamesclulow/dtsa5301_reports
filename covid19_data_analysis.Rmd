@@ -1,0 +1,559 @@
+---
+title: "COVID-19 Data Analysis Report"
+author: "James S Clulow"
+date: "2023-08-14"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# Load required libraries
+library(tidyverse)
+library(knitr)
+```
+
+## Step 1 - Data Loading
+
+Start by loading in the data from the four main files of time series data on COVID-19 from Johns Hopkins University. This data is obtained from the JHU CSSE COVID-19 Dataset hosted on github at the following url: https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data
+
+```{r, get_data_from_jhu}
+# Get current data from the four time series files
+# "time_series_covid19_confirmed_global.csv"
+# "time_series_covid19_deaths_global.csv"
+# "time_series_covid19_confirmed_US.csv"
+# "time_series_covid19_deaths_US.csv"
+
+url <-
+  "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series"
+
+filenames <- c(
+  "time_series_covid19_confirmed_global.csv",
+  "time_series_covid19_deaths_global.csv",
+  "time_series_covid19_confirmed_US.csv",
+  "time_series_covid19_deaths_US.csv"
+)
+
+urls <- file.path(url, filenames)
+
+# Load population data from jhu
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+```
+
+Read in the data and take a look at the structure.
+
+```{r, load_data}
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+us_cases <- read_csv(urls[3])
+us_deaths <- read_csv(urls[4])
+
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2)) %>%
+  rename(
+    country_region = Country_Region,
+    province_state = Province_State,
+    population = Population
+  )
+```
+
+```{r, data_structure_raw, results='asis'}
+kable(head(global_cases[,1:5]), caption = "global_cases data")
+kable(head(global_deaths[,1:5]), caption = "global_deaths data")
+kable(head(us_cases[,1:13]), caption = "us_cases data")
+kable(head(us_deaths[,1:13]), caption = "us_deaths data")
+```
+
+## Step 2 - Data Cleaning
+
+After reading in the four datasets, the data sets need to be tidied up to put each variable in their own column in long format. This is obvious when looking at the tables above. Additionally, there is no need for the latitude and longitude for the analysis planned so this can be dropped from the datasets.
+
+### Cleaning the global dataset 
+
+```{r, data_cleaning_global}
+# Tidy global_cases data and pivot to long format
+global_cases <- global_cases %>%
+  pivot_longer(cols = 
+                 -c(`Province/State`,
+                    `Country/Region`,
+                    Lat,
+                    Long),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(-c(Lat, Long))
+
+# Tidy global_deaths data and pivot to long format
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = 
+                 -c(`Province/State`,
+                    `Country/Region`,
+                    Lat,
+                    Long),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(-c(Lat, Long))
+
+# Join global cases and deaths data sets
+global <- global_cases %>% 
+  full_join(global_deaths) %>%
+  rename(country_region = `Country/Region`,
+         province_state = `Province/State`) %>%
+  mutate(date = mdy(date))
+```
+
+The tidied "global" data set looks much nicer now.
+
+```{r, data_structure_global, results='asis'}
+kable(head(global))
+```
+
+```{r, global_summary}
+summary(global)
+str(global)
+```
+
+It looks like there are probably a lot of rows where cases are equal to 0 so let's remove those rows.
+
+```{r, global_cleaning2}
+# Keep only cases greater than zero
+global <- global %>%
+  filter(cases > 0)
+summary(global)
+str(global)
+
+# Validate maximum number of cases
+global %>% filter(cases > 103500000)
+```
+
+Here we only keep rows where cases are greater than zero and double check to make sure that the maximum values do not appear to be a typo and there is continuity in the dataset. It seems OK at this point for both cases and deaths for the "global" data set.
+
+### US Dataset
+
+Next, lets clean the "us" data set.
+
+```{r, data_cleaning_us}
+# Tidy us_cases data and pivot to long format
+us_cases <- us_cases %>%
+  pivot_longer(cols = 
+                 -c(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+
+# Tidy us_deaths data and pivot to long format
+us_deaths <- us_deaths %>%
+  pivot_longer(cols = -c(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+
+# Join global cases and deaths data sets
+us <- us_cases %>% 
+  full_join(us_deaths) %>%
+  rename(county = Admin2,
+         country_region = Country_Region,
+         province_state = Province_State,
+         combined_key = Combined_Key,
+         population = Population)
+```
+
+The tidied "us" data set looks much nicer now, but it has some additional columns which are not present in the "global" data set. We will need to add these columns to the global data set.
+
+```{r, data_structure_us, results='asis'}
+kable(head(us), caption = "data_structure_us")
+```
+
+### Adding columns to "global" dataset
+
+```{r, add_cols_global}
+# Add combined_key column to "global" dataset
+global <- global %>%
+  unite(
+    "combined_key",
+    c(province_state, country_region),
+    sep = ",",
+    na.rm = TRUE,
+    remove = FALSE
+  )
+
+# Add population column to "global" dataset by combining with uid
+global <- global %>%
+  left_join(uid, by = c("province_state", "country_region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(province_state,
+         country_region,
+         date,
+         cases,
+         deaths,
+         population,
+         combined_key)
+```
+
+Now that we have the same columns in both datasets we can start the analysis.
+
+## Step 3 - Visualising the data
+
+```{r, us_by_state}
+# Create us_by_state data
+us_by_state <- us %>%
+  group_by(province_state, country_region, date) %>%
+  summarise(
+    cases = sum(cases),
+    deaths = sum(deaths),
+    population = sum(population)
+  ) %>% 
+  mutate(deaths_per_mill = deaths * 1000000 / population) %>%
+  select(province_state, country_region, date, cases, deaths, deaths_per_mill, population) %>%
+  ungroup()
+```
+
+```{r, us_by_state_str, results = 'asis'}
+# Look at data structure for us_by_state
+kable(head(us_by_state), caption = "data_structure_by_state")
+```
+
+Now that we have state data by state, lets do a sense check on the population values to be sure everything is ok. The population of Alaska was reported to be around 731,158 in 2020 (source US Census Bureau).
+
+```{r, us_by_state_check}
+# Check reported population of Alaska
+filter(us_by_state, province_state == "Alaska", date == ymd("2020-01-31")) %>% select(province_state, population)
+```
+Here we calculate of population of 740,995 which is relatively close to the census data found online.
+
+```{r, us_totals}
+# Create us_totals data
+us_totals <- us_by_state %>%
+  group_by(country_region, date) %>%
+  summarise(
+    cases = sum(cases),
+    deaths = sum(deaths),
+    population = sum(population)
+  ) %>% 
+  mutate(deaths_per_mill = deaths * 1000000 / population) %>%
+  select(country_region, date, cases, deaths, deaths_per_mill, population) %>%
+  ungroup()
+```
+
+```{r, us_totals_str, results = 'asis'}
+# Look at data structure for us_totals
+kable(head(us_totals), caption = "data_structure_us_totals")
+```
+
+Now that we have the US totals, lets double check the population here as well. The projected total US population on January 1st, 2023 was 334,233,854 (source US Census Bureau). Our total of 332,875,137 is quite close, however, we see that the population for at the start of the pandemic is the same. As such, there may be some bias in the results knowing that the population data is static and does not change over time as it should in reality.
+
+```{r, us_totals_check}
+# Check us_totals data
+tail(us_totals)
+```
+### Visualization of total data in the USA
+
+Now that we have checked the quality of our "us_totals" data set, lets visualize the data.
+
+```{r, us_totals_graph}
+us_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(angle = 90)) +
+  ggtitle("COVID-19 cases and deaths in the USA") +
+  labs(x = "Date", y = NULL)
+```
+Shown above is a graph of the total number of cases and deaths (in red and blue respectively) by date since the start of the COVID-19 pandemic in the USA. The data are plotted on a logarithmic scale to facilitate reading of the graph.
+
+### Visualisation of data by state
+
+```{r, new_york_graph}
+state <- "New York"
+us_by_state %>%
+  filter(province_state == state) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(angle = 90)) +
+  ggtitle(str_c("COVID-19 cases and deaths in ", state)) +
+  labs(x = "Date", y = NULL)
+```
+
+Shown above is a graph of the total number of cases and deaths (in red and blue respectively) by date since the start of the COVID-19 pandemic in the state of New York. The data are plotted on a logarithmic scale to facilitate reading of the graph.
+
+At the time the preparation of this report, the latest information was from `r max(us_totals$date)` and the total number of deaths since the start of the pandemic in the USA has sadly reached `r max(us_totals$deaths)`.
+
+## Step 4 - Analysing data 
+
+After looking at the data, we are lead the the question of "Have the number of new cases leveled off?". To answer that question, we will need to go back to our data and transform it again by creating two new variables "new_cases" and "new_deaths".
+
+### Creating new variables - new cases and new deaths
+
+```{r, add_new_cases_deaths}
+# Add new_cases and new_deaths variables to us_by_state
+us_by_state <- us_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+# Add new_cases and new_deaths variables to us_totals
+us_totals <- us_totals %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+```
+
+Now that we have created the new variables, lets check what they look like for both the totals and by_state data sets.
+
+```{r, new_variables_check, results = 'asis'}
+# Check us_by_state data with new variables
+kable(tail(us_by_state) %>%
+  select(new_cases, new_deaths, everything()), caption = "us_by_state with new variables")
+
+# Check us_totals data with new variables
+kable(tail(us_totals) %>%
+  select(new_cases, new_deaths, everything()), caption = "us_totals with new variables")
+```
+
+### Visualising data with new variables
+
+```{r, us_new_cases_graph, warning=FALSE, echo=FALSE}
+us_totals %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(angle = 90)) +
+  ggtitle("COVID-19 new cases and new deaths in the USA") +
+  labs(x = "Date", y = NULL) +
+  geom_vline(xintercept = ymd("2021-08-02"), colour = "red")
+```
+
+The graph above shows the number of new cases and new deaths (in red and blue respectively) in the USA since the start of the COVID-19 pandemic. The date of August 2nd 2021 is marked in red to highlight the date where the vaccination goal of 70% of the US population vaccinated with at least one dose of the COVID-19 vaccine was met.
+
+```{r, ny_new_cases_graph, warning=FALSE, echo=FALSE}
+us_by_state %>%
+  filter(province_state == "New York") %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(angle = 90)) +
+  ggtitle("COVID-19 new cases and new deaths in the state of New York") +
+  labs(x = "Date", y = NULL) +
+  geom_vline(xintercept = ymd("2021-08-02"), colour = "grey")
+```
+The graph above shows the number of new cases and new deaths (in red and blue respectively) in the state of New York since the start of the COVID-19 pandemic. The date of August 2nd 2021 is marked in red to highlight the date where the vaccination goal of 70% of the US population vaccinated with at least one dose of the COVID-19 vaccine was met.
+
+### Creating new variables - case and death rates
+
+After analyzing the new cases and deaths, we wanted to ask, which states were the worst in terms of case rate and death rate per population. To do so, we need to go back to our data and create some new variables.
+
+```{r, add_death_case_rates}
+# Add cases_per_thou and deaths_per_thou variables to us_by_state
+us_state_totals <- us_by_state %>%
+  group_by(province_state) %>%
+  summarise(
+    deaths = max(deaths),
+    cases = max(cases),
+    population = max(population),
+    cases_per_thou = 1000 * cases / population,
+    deaths_per_thou = 1000 * deaths / population
+  ) %>%
+  filter(cases > 0, population > 0)
+```
+
+### Analysis of highest and lowest rates
+
+```{r, check_lowest, results = 'asis'}
+# Check lowest case rate states
+kable(
+  us_state_totals %>%
+    slice_min(cases_per_thou,
+              n = 10) %>%
+    select(deaths_per_thou, cases_per_thou, everything()),
+  caption = "Ten lowest case rate states"
+)
+
+# Check lowest death rate states
+kable(
+  us_state_totals %>%
+    slice_min(deaths_per_thou,
+              n = 10) %>%
+    select(deaths_per_thou, cases_per_thou, everything()),
+  caption = "Ten lowest death rate states"
+)
+
+# Check highest case rate states
+kable(
+  us_state_totals %>%
+    slice_max(cases_per_thou,
+              n = 10) %>%
+    select(deaths_per_thou, cases_per_thou, everything()),
+  caption = "Ten highest case rate states"
+)
+
+# Check highest death rate states
+kable(
+  us_state_totals %>%
+    slice_max(deaths_per_thou,
+              n = 10) %>%
+    select(deaths_per_thou, cases_per_thou, everything()),
+  caption = "Ten highest death rate states"
+)
+```
+
+### Comparison - Alaska vs. Arizona
+
+An interesting case is that of Alaska where there is a high case rate, but a relatively low death rate. Perhaps it would be interesting to visualize the cases in Alaska vs the cases in Arizona which had a lower case rate, but a higher death rate that Alaska to better understand why that may be.
+
+```{r, ak_graph, warning=FALSE}
+us_by_state %>%
+  filter(province_state %in% c("Alaska", "Arizona")) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(angle = 90)) +
+  facet_wrap(~ province_state) +
+  ggtitle("COVID-19 cases and deaths in the states of Alaska and Arizona") +
+  labs(x = "Date", y = NULL)
+```
+
+```{r, ak_new_cases_graph, warning=FALSE, echo=FALSE}
+us_by_state %>%
+  filter(province_state %in% c("Alaska", "Arizona")) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(angle = 90)) +
+  ggtitle("COVID-19 new cases and new deaths in the states of Alaska and Arizona") +
+  facet_wrap(~ province_state) +
+  labs(x = "Date", y = NULL) +
+  geom_vline(xintercept = ymd("2021-08-02"), colour = "grey50")
+```
+
+There are plenty of factors that may have contributed to the higher death rate in Arizona. I would hypothesize that the difference in age demographics between Alaska and Arizona may be one of the contributing factors, but I would need to have the age of patients for each case to test this hypothesis. Nevertheless, 13.9% of the population of Alaska is over 65 years of age vs. 18.8% in Arizona (source US Census Bureau). Considering the fact that persons over 65 years of age have a higher risk of mortality from COVID-19 infection, this may explain some of the difference in death rates seen between the two states.
+
+## Step 5 - Modeling Data
+
+### Linear modeling of COVID-19 Data
+
+Let's start of modeling our COVID-19 Data by creating a simple linear model of deaths per thousand predicted by cases per thousand using the US state totals.
+
+```{r, linear_modeling}
+# Create linear model and view a summary of the linear model
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = us_state_totals)
+summary(mod)
+
+# Check what state has the smallest and largest cases per thousand
+us_state_totals %>% slice_min(cases_per_thou)
+us_state_totals %>% slice_max(cases_per_thou)
+
+# Calculate predicted values using linear model
+us_total_w_pred <- us_state_totals %>% mutate(pred = predict(mod))
+```
+
+Now that we have created a model and added the predicted values to a new data set, we can visualise the predicted values versus the actual values.
+
+```{r, visualise_predictions}
+# Plot predicted vs actual values.
+ggplot(us_total_w_pred, aes(x = cases_per_thou, y = deaths_per_thou))+
+  geom_point(color = "blue") +
+  geom_point(aes(y = pred), color = "red")
+```
+
+We can see from the data that cases per thousand is a predictor of deaths per thousand, however, there are clearly other factors leading to differences between one state and another.
+
+### Linear modeling - Global data
+
+Let's look at how this differs on a global scale. To do so, we will need to create a global totals with the deaths and cases per thousand variables.
+
+```{r, add_death_case_rates_global}
+# create_global_by_country
+global_by_country <- global %>%
+  group_by(country_region, date) %>%
+  summarise(
+    cases = sum(cases),
+    deaths = sum(deaths),
+    population = sum(population)
+  ) %>% 
+  select(country_region, date, cases, deaths, population) %>%
+  ungroup()
+
+# Add cases_per_thou and deaths_per_thou variables to global
+global_totals <- global_by_country %>%
+  group_by(country_region) %>%
+  summarise(
+    deaths = max(deaths),
+    cases = max(cases),
+    population = max(population),
+    cases_per_thou = 1000 * cases / population,
+    deaths_per_thou = 1000 * deaths / population
+  ) %>%
+  filter(cases > 0, population > 0)
+
+# Check structure of global_totals
+head(global_totals)
+```
+Now that we have created out global totals dataset, we can create a linear model and look at the summary.
+
+```{r, linear_modeling_global}
+# Create linear model and view a summary of the linear model
+mod_global <- lm(deaths_per_thou ~ cases_per_thou, data = global_totals)
+summary(mod_global)
+
+# Check what country has the smallest and largest cases per thousand
+global_totals %>% slice_min(cases_per_thou)
+global_totals %>% slice_max(cases_per_thou)
+
+# Calculate predicted values using linear model
+global_total_w_pred <- global_totals %>% mutate(pred = predict(mod_global))
+```
+Let's visualise the predictions on the global linear model.
+
+```{r, visualise_predictions_global}
+# Plot predicted vs actual values.
+ggplot(global_total_w_pred, aes(x = cases_per_thou, y = deaths_per_thou))+
+  geom_point(color = "blue") +
+  geom_point(aes(y = pred), color = "red")
+```
+
+Here we see again that cases per thousand remains a good predictor of deaths per thousand, however, there are definitely other factors leading to the differences observed from one country to another. As mentioned previously in the Arizona vs. Alaska example, age demographics may play a role here, however, there may also be issues with how data are reported from one country to another. This leads to our final section on bias identification.
+
+## Step 6 - Bias identification
+
+Within the COVID-19 dataset, there may be significant differences from how deaths related to COVID-19 are recorded from one country to another as well as how frequently cases are recorded. This makes it challenging to compare data from one country to another and my result in bias in the data sets.
+
+Additionally, different countries have had different access to vaccines during the pandemic. This may impact the relationship between cases and deaths, specifically in years following the roll out of the vaccine which was approved for emergency use in December 2020. Our data set goes up to 2023.
+
+Furthermore, following mass vaccination programs and decreasing cases globally, the quality of data on COVID-19 and the frequency of reporting has decreased overall.
